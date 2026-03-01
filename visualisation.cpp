@@ -2,37 +2,132 @@
 #include <string>
 #include <vector>
 #include <bitset>
-#include <sstream>
+#include <cmath>
+#include <iomanip>
 #include <thread>
 #include <chrono>
-#include <iomanip>
-#include <cmath>
+#include <fstream>
+#include <csignal>
+#include <cstdint>
+
+// ============ Global Variables ============
+std::string g_delay = "normal";
+std::string g_state = "";
+std::string g_input;
+std::string g_type;
+std::vector<uint8_t> g_bytes;
+std::string g_message;
+std::vector<std::string> g_blocks;
+std::string g_block;
+int g_block_number = 0;
+std::vector<uint32_t> g_hash;
+
+// ============ Signal Handler ============
+void signalHandler(int signum) {
+    std::cout << "\nInterrupted. Exiting cleanly." << std::endl;
+    exit(signum);
+}
 
 // ============ Utility Functions ============
-
 void clearScreen() {
-    // ANSI escape sequence to clear screen
     std::cout << "\033[2J\033[1;1H";
 }
 
 void delay(const std::string& speed) {
-    if (speed == "fastest") {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    } else if (speed == "fast") {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    } else if (speed == "normal") {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    } else if (speed == "slow") {
-        std::this_thread::sleep_for(std::chrono::milliseconds(400));
-    } else if (speed == "end") {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    if (g_delay == "enter") {
+        std::cin.get();
+    } else if (g_delay == "nodelay") {
+        std::this_thread::sleep_for(std::chrono::milliseconds(0));
+    } else {
+        double multiplier = (g_delay == "fast") ? 0.5 : 1.0;
+        
+        int sleepTime = 0;
+        if (speed == "fastest") sleepTime = 100 * multiplier;
+        else if (speed == "fast") sleepTime = 200 * multiplier;
+        else if (speed == "normal") sleepTime = 400 * multiplier;
+        else if (speed == "slow") sleepTime = 600 * multiplier;
+        else if (speed == "slowest") sleepTime = 800 * multiplier;
+        else if (speed == "end") sleepTime = 1000 * multiplier;
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(sleepTime));
     }
 }
 
-std::string bits(uint32_t value) {
-    return std::bitset<32>(value).to_string();
+std::string bits(uint32_t x, int n = 32) {
+    if (x >= 0) {
+        std::string binary = std::bitset<32>(x).to_string();
+        return binary.substr(32 - n, n);
+    } else {
+        std::string result;
+        for (int i = n - 1; i >= 0; i--) {
+            result += ((x >> i) & 1) ? '1' : '0';
+        }
+        return result;
+    }
 }
 
+std::string hex(uint32_t i) {
+    std::stringstream ss;
+    ss << std::hex << std::setfill('0') << std::setw(8) << i;
+    return ss.str();
+}
+
+// ============ Input Processing ============
+std::string input_type(const std::string& input) {
+    std::ifstream file(input);
+    if (file.good()) {
+        return "file";
+    } else {
+        if (input.length() >= 2) {
+            std::string prefix = input.substr(0, 2);
+            if (prefix == "0b") {
+                std::string binary = input.substr(2);
+                if (binary.find_first_not_of("01") != std::string::npos) {
+                    std::cout << "Invalid binary string: " << input << std::endl;
+                    exit(1);
+                }
+                return "binary";
+            } else if (prefix == "0x") {
+                std::string hexStr = input.substr(2);
+                for (char c : hexStr) {
+                    if (!isxdigit(c)) {
+                        std::cout << "Invalid hex string: " << input << std::endl;
+                        exit(1);
+                    }
+                }
+                return "hex";
+            }
+        }
+        return "string";
+    }
+}
+
+std::vector<uint8_t> bytes(const std::string& input, const std::string& type) {
+    std::vector<uint8_t> result;
+
+    if (type == "binary") {
+        std::string bin = input.substr(2);
+        if (bin.length() % 8 == 0) {
+            for (size_t i = 0; i < bin.length(); i += 8) {
+                std::string byteStr = bin.substr(i, 8);
+                result.push_back(std::bitset<8>(byteStr).to_ulong());
+            }
+        }
+    } else if (type == "hex") {
+        std::string hexStr = input.substr(2);
+        for (size_t i = 0; i < hexStr.length(); i += 2) {
+            std::string byteStr = hexStr.substr(i, 2);
+            result.push_back(std::stoi(byteStr, nullptr, 16));
+        }
+    } else {
+        for (char c : input) {
+            result.push_back(static_cast<uint8_t>(c));
+        }
+    }
+    return result;
+}
+
+// ============ SHA-256 Operations ============
 uint32_t rotr(int n, uint32_t x) {
     return (x >> n) | (x << (32 - n));
 }
@@ -41,275 +136,316 @@ uint32_t shr(int n, uint32_t x) {
     return x >> n;
 }
 
-// σ0 function: (rotr 7) XOR (rotr 18) XOR (shr 3)
 uint32_t sigma0(uint32_t x) {
     return rotr(7, x) ^ rotr(18, x) ^ shr(3, x);
 }
 
-// σ1 function: (rotr 17) XOR (rotr 19) XOR (shr 10)
 uint32_t sigma1(uint32_t x) {
     return rotr(17, x) ^ rotr(19, x) ^ shr(10, x);
 }
 
+uint32_t usigma0(uint32_t x) {
+    return rotr(2, x) ^ rotr(13, x) ^ rotr(22, x);
+}
+
+uint32_t usigma1(uint32_t x) {
+    return rotr(6, x) ^ rotr(11, x) ^ rotr(25, x);
+}
+
+uint32_t ch(uint32_t x, uint32_t y, uint32_t z) {
+    return (x & y) ^ ((~x) & z);
+}
+
+uint32_t maj(uint32_t x, uint32_t y, uint32_t z) {
+    return (x & y) ^ (x & z) ^ (y & z);
+}
+
+uint32_t add(uint32_t a, uint32_t b) {
+    return (a + b) & 0xFFFFFFFF;
+}
+
+uint32_t add(uint32_t a, uint32_t b, uint32_t c) {
+    return (a + b + c) & 0xFFFFFFFF;
+}
+
 uint32_t add(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
-    return a + b + c + d;
+    uint64_t total = static_cast<uint64_t>(a) + b + c + d;
+    return static_cast<uint32_t>(total & 0xFFFFFFFF);
 }
 
+uint32_t add(uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e) {
+    uint64_t total = static_cast<uint64_t>(a) + b + c + d + e;
+    return static_cast<uint32_t>(total & 0xFFFFFFFF);
+}
+
+// ============ Constants ============
+std::vector<uint32_t> calculateK() {
+    std::vector<uint32_t> constants;
+    int primes[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 
+                    59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 
+                    127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 
+                    191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 
+                    257, 263, 269, 271, 277, 281, 283, 293, 307, 311};
+    
+    for (int prime : primes) {
+        double cubeRoot = std::pow(prime, 1.0 / 3.0);
+        double fractional = cubeRoot - std::floor(cubeRoot);
+        uint32_t value = static_cast<uint32_t>(fractional * std::pow(2, 32));
+        constants.push_back(value);
+    }
+    return constants;
+}
+
+std::vector<uint32_t> calculateIV() {
+    std::vector<uint32_t> initial;
+    int primes[] = {2, 3, 5, 7, 11, 13, 17, 19};
+    
+    for (int prime : primes) {
+        double squareRoot = std::sqrt(prime);
+        double fractional = squareRoot - std::floor(squareRoot);
+        uint32_t value = static_cast<uint32_t>(fractional * std::pow(2, 32));
+        initial.push_back(value);
+    }
+    return initial;
+}
+
+const std::vector<uint32_t> K = calculateK();
+const std::vector<uint32_t> IV = calculateIV();
+
+// ============ SHA-256 Core Functions ============
 std::string padding(const std::string& message) {
-    // Simplified padding for demonstration
-    std::string padded = message;
-    padded += "1";
+    size_t l = message.size();
+    int k = (448 - static_cast<int>(l) - 1) % 512;
+    if (k < 0) k += 512;
     
-    // Pad with zeros to make length multiple of 512
-    int paddingZeros = 512 - ((padded.length() + 64) % 512);
-    padded.append(paddingZeros, '0');
-    
-    // Append original length (64 bits)
-    uint64_t bitLength = message.length();
-    std::string lengthBits = std::bitset<64>(bitLength).to_string();
-    padded += lengthBits;
-    
-    return padded;
+    std::string l64 = bits(l, 64);
+    return message + "1" + std::string(k, '0') + l64;
 }
 
-std::vector<std::string> split(const std::string& str, int chunkSize) {
-    std::vector<std::string> chunks;
-    for (size_t i = 0; i < str.length(); i += chunkSize) {
-        chunks.push_back(str.substr(i, chunkSize));
+std::vector<std::string> split(const std::string& message, int size = 512) {
+    std::vector<std::string> blocks;
+    for (size_t i = 0; i < message.length(); i += size) {
+        blocks.push_back(message.substr(i, size));
     }
-    return chunks;
+    return blocks;
 }
 
-// ============ Main Visualization ============
-
-void visualizeMessageSchedule(int t, const std::vector<uint32_t>& schedule, const std::string& indent) {
-    // Format word numbers with padding
-    auto formatNum = [](int num) -> std::string {
-        std::string s = std::to_string(num);
-        if (s.length() == 1) return " " + s;
-        return s;
-    };
-    
-    std::string t_16 = formatNum(t - 16);
-    std::string t_15 = formatNum(t - 15);
-    std::string t_14 = formatNum(t - 14);
-    std::string t_13 = formatNum(t - 13);
-    std::string t_12 = formatNum(t - 12);
-    std::string t_11 = formatNum(t - 11);
-    std::string t_10 = formatNum(t - 10);
-    std::string t_9  = formatNum(t - 9);
-    std::string t_8  = formatNum(t - 8);
-    std::string t_7  = formatNum(t - 7);
-    std::string t_6  = formatNum(t - 6);
-    std::string t_5  = formatNum(t - 5);
-    std::string t_4  = formatNum(t - 4);
-    std::string t_3  = formatNum(t - 3);
-    std::string t_2  = formatNum(t - 2);
-    std::string t_1  = formatNum(t - 1);
-    std::string t_0  = formatNum(t);
-    
-    std::cout << indent << "----------------" << std::endl;
-    std::cout << indent << "message schedule: (expansion)" << std::endl;
-    std::cout << indent << "----------------" << std::endl;
-    std::cout << indent << "W" << t_16 << " " << bits(schedule[t-16]) << std::endl;
-    std::cout << indent << "W" << t_15 << " " << bits(schedule[t-15]) << std::endl;
-    std::cout << indent << "W" << t_14 << " " << bits(schedule[t-14]) << std::endl;
-    std::cout << indent << "W" << t_13 << " " << bits(schedule[t-13]) << std::endl;
-    std::cout << indent << "W" << t_12 << " " << bits(schedule[t-12]) << std::endl;
-    std::cout << indent << "W" << t_11 << " " << bits(schedule[t-11]) << std::endl;
-    std::cout << indent << "W" << t_10 << " " << bits(schedule[t-10]) << std::endl;
-    std::cout << indent << "W" << t_9  << " " << bits(schedule[t-9]) << std::endl;
-    std::cout << indent << "W" << t_8  << " " << bits(schedule[t-8]) << std::endl;
-    std::cout << indent << "W" << t_7  << " " << bits(schedule[t-7]) << std::endl;
-    std::cout << indent << "W" << t_6  << " " << bits(schedule[t-6]) << std::endl;
-    std::cout << indent << "W" << t_5  << " " << bits(schedule[t-5]) << std::endl;
-    std::cout << indent << "W" << t_4  << " " << bits(schedule[t-4]) << std::endl;
-    std::cout << indent << "W" << t_3  << " " << bits(schedule[t-3]) << std::endl;
-    std::cout << indent << "W" << t_2  << " " << bits(schedule[t-2]) << std::endl;
-    std::cout << indent << "W" << t_1  << " " << bits(schedule[t-1]) << std::endl;
-    std::cout << indent << "W" << t_0  << "                                  = σ1(t-2) + (t-7) + σ0(t-15) + (t-16)" << std::endl;
-}
-
-int main(int argc, char* argv[]) {
-    std::string input = "abc";
-    std::string block;
-    int t = 63; // Default word number
-    
-    // Parse command line arguments
-    if (argc > 1) {
-        block = argv[1];
-        if (block.length() < 512) {
-            block = std::string(512 - block.length(), '0') + block;
-        }
-    }
-    
-    if (argc > 2) {
-        t = std::stoi(argv[2]);
-    }
-    
-    // Default message processing
-    std::string message;
-    if (block.empty()) {
-        // Convert input to binary string
-        for (char c : input) {
-            message += std::bitset<8>(c).to_string();
-        }
-        
-        std::string padded = padding(message);
-        std::vector<std::string> blocks = split(padded, 512);
-        block = blocks[0];
-    }
-    
-    // Create message schedule
+std::vector<uint32_t> calculate_schedule(const std::string& block) {
     std::vector<uint32_t> schedule;
-    
-    // First 16 words from block
+
     for (size_t i = 0; i < 16; i++) {
         std::string word = block.substr(i * 32, 32);
         schedule.push_back(std::bitset<32>(word).to_ulong());
     }
-    
-    // Calculate remaining 48 words
+
     for (int i = 16; i <= 63; i++) {
-        uint32_t w = sigma1(schedule[i - 2]) + schedule[i - 7] + 
-                    sigma0(schedule[i - 15]) + schedule[i - 16];
-        schedule.push_back(w);
+        schedule.push_back(add(sigma1(schedule[i - 2]), 
+                               schedule[i - 7], 
+                               sigma0(schedule[i - 15]), 
+                               schedule[i - 16]));
     }
-    
+    return schedule;
+}
+
+std::vector<uint32_t> compression(const std::vector<uint32_t>& initial, 
+                                  const std::vector<uint32_t>& schedule) {
+    uint32_t h = initial[7];
+    uint32_t g = initial[6];
+    uint32_t f = initial[5];
+    uint32_t e = initial[4];
+    uint32_t d = initial[3];
+    uint32_t c = initial[2];
+    uint32_t b = initial[1];
+    uint32_t a = initial[0];
+
+    for (int i = 0; i < 64; i++) {
+        uint32_t t1 = add(schedule[i], K[i], usigma1(e), ch(e, f, g), h);
+        uint32_t t2 = add(usigma0(a), maj(a, b, c));
+
+        h = g;
+        g = f;
+        f = e;
+        e = add(d, t1);
+        d = c;
+        c = b;
+        b = a;
+        a = add(t1, t2);
+    }
+
+    std::vector<uint32_t> hash(8);
+    hash[7] = add(initial[7], h);
+    hash[6] = add(initial[6], g);
+    hash[5] = add(initial[5], f);
+    hash[4] = add(initial[4], e);
+    hash[3] = add(initial[3], d);
+    hash[2] = add(initial[2], c);
+    hash[1] = add(initial[1], b);
+    hash[0] = add(initial[0], a);
+
+    return hash;
+}
+
+// ============ Visualization Functions ============
+void showMessage() {
+    clearScreen();
+    std::cout << "========================" << std::endl;
+    std::cout << "Original Message: " << g_input << std::endl;
+    std::cout << "Type: " << g_type << std::endl;
+    std::cout << "Bytes: ";
+    for (uint8_t byte : g_bytes) {
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)byte << " ";
+    }
+    std::cout << std::dec << std::endl;
+    std::cout << "Binary: " << g_message.substr(0, 64) << "..." << std::endl;
+    std::cout << "========================" << std::endl;
+    delay("normal");
+}
+
+void showPadding() {
+    clearScreen();
+    std::cout << "========================" << std::endl;
+    std::cout << "Padding applied" << std::endl;
+    std::cout << "========================" << std::endl;
+    std::cout << "Message length: " << g_message.length() << " bits" << std::endl;
+    std::cout << "Padding adds '1' bit + zeros + 64-bit length" << std::endl;
+    delay("normal");
+}
+
+void showBlocks() {
+    clearScreen();
+    std::cout << "========================" << std::endl;
+    std::cout << "Message Blocks (" << g_blocks.size() << " blocks of 512 bits)" << std::endl;
+    std::cout << "========================" << std::endl;
+    for (size_t i = 0; i < g_blocks.size(); i++) {
+        std::cout << "Block " << i << ": " << g_blocks[i].substr(0, 64) << "..." << std::endl;
+    }
+    delay("normal");
+}
+
+void showInitialHashValues() {
+    int primes[] = {2, 3, 5, 7, 11, 13, 17, 19};
+    std::string registers[] = {"a", "b", "c", "d", "e", "f", "g", "h"};
     std::string indent = "  ";
     
-    // ============ Animation Frames ============
-    
-    // Frame 1: Basic display
     clearScreen();
-    visualizeMessageSchedule(t, schedule, indent);
-    delay("normal");
+    std::cout << indent << "-----------" << std::endl;
+    std::cout << indent << "Initial Hash Values (H0)" << std::endl;
+    std::cout << indent << "-----------" << std::endl;
     
-    // Frame 2: Highlight t-16
-    clearScreen();
-    std::cout << indent << "----------------" << std::endl;
-    std::cout << indent << "message schedule: (expansion)" << std::endl;
-    std::cout << indent << "----------------" << std::endl;
-    std::cout << indent << "W" << (t-16 < 10 ? " " : "") << (t-16) << " " << bits(schedule[t-16]) << "  ->  " << bits(schedule[t-16]) << std::endl;
-    for (int i = t-15; i <= t-1; i++) {
-        std::cout << indent << "W" << (i < 10 ? " " : "") << i << " " << bits(schedule[i]) << std::endl;
+    for (int i = 0; i < 8; i++) {
+        std::cout << indent << registers[i] << " = " << bits(IV[i]) << " (0x" << hex(IV[i]) << ")" << std::endl;
+        std::cout << indent << "    √" << primes[i] << " fractional part * 2^32" << std::endl;
     }
-    std::cout << indent << "W" << t << "                                  = σ1(t-2) + (t-7) + σ0(t-15) + (t-16)" << std::endl;
-    delay("normal");
-    
-    // Frame 3: Show ROTR 7 animation start
-    clearScreen();
-    std::cout << indent << "----------------" << std::endl;
-    std::cout << indent << "message schedule: (expansion)" << std::endl;
-    std::cout << indent << "----------------" << std::endl;
-    std::cout << indent << "W" << (t-16 < 10 ? " " : "") << (t-16) << " " << bits(schedule[t-16]) << "  ->  " << bits(schedule[t-16]) << std::endl;
-    std::cout << indent << "W" << (t-15 < 10 ? " " : "") << (t-15) << " " << bits(schedule[t-15]) << "  ->  " << bits(schedule[t-15]) << " ROTR 7" << std::endl;
-    std::cout << indent << "W" << (t-14 < 10 ? " " : "") << (t-14) << " " << bits(schedule[t-14]) << "      " << bits(schedule[t-15]) << " ROTR 18" << std::endl;
-    std::cout << indent << "W" << (t-13 < 10 ? " " : "") << (t-13) << " " << bits(schedule[t-13]) << "      " << bits(schedule[t-15]) << "  SHR 3" << std::endl;
-    for (int i = t-12; i <= t-1; i++) {
-        std::cout << indent << "W" << (i < 10 ? " " : "") << i << " " << bits(schedule[i]) << std::endl;
-    }
-    std::cout << indent << "W" << t << "                                  = σ1(t-2) + (t-7) + σ0(t-15) + (t-16)" << std::endl;
-    delay("normal");
-    
-    // ROTR 7 animation
-    for (int i = 1; i <= 7; i++) {
-        clearScreen();
-        std::cout << indent << "----------------" << std::endl;
-        std::cout << indent << "message schedule: (expansion)" << std::endl;
-        std::cout << indent << "----------------" << std::endl;
-        std::cout << indent << "W" << (t-16 < 10 ? " " : "") << (t-16) << " " << bits(schedule[t-16]) << "  ->  " << bits(schedule[t-16]) << std::endl;
-        std::cout << indent << "W" << (t-15 < 10 ? " " : "") << (t-15) << " " << bits(schedule[t-15]) << "  ->  " << bits(rotr(i, schedule[t-15])) << " ROTR 7" << std::endl;
-        std::cout << indent << "W" << (t-14 < 10 ? " " : "") << (t-14) << " " << bits(schedule[t-14]) << "      " << bits(schedule[t-15]) << " ROTR 18" << std::endl;
-        std::cout << indent << "W" << (t-13 < 10 ? " " : "") << (t-13) << " " << bits(schedule[t-13]) << "      " << bits(schedule[t-15]) << "  SHR 3" << std::endl;
-        for (int j = t-12; j <= t-1; j++) {
-            std::cout << indent << "W" << (j < 10 ? " " : "") << j << " " << bits(schedule[j]) << std::endl;
-        }
-        std::cout << indent << "W" << t << "                                  = σ1(t-2) + (t-7) + σ0(t-15) + (t-16)" << std::endl;
-        delay("fastest");
-    }
-    delay("normal");
-    
-    // ROTR 18 animation
-    for (int i = 1; i <= 18; i++) {
-        clearScreen();
-        std::cout << indent << "----------------" << std::endl;
-        std::cout << indent << "message schedule: (expansion)" << std::endl;
-        std::cout << indent << "----------------" << std::endl;
-        std::cout << indent << "W" << (t-16 < 10 ? " " : "") << (t-16) << " " << bits(schedule[t-16]) << "  ->  " << bits(schedule[t-16]) << std::endl;
-        std::cout << indent << "W" << (t-15 < 10 ? " " : "") << (t-15) << " " << bits(schedule[t-15]) << "  ->  " << bits(rotr(7, schedule[t-15])) << " ROTR 7" << std::endl;
-        std::cout << indent << "W" << (t-14 < 10 ? " " : "") << (t-14) << " " << bits(schedule[t-14]) << "      " << bits(rotr(i, schedule[t-15])) << " ROTR 18" << std::endl;
-        std::cout << indent << "W" << (t-13 < 10 ? " " : "") << (t-13) << " " << bits(schedule[t-13]) << "      " << bits(schedule[t-15]) << "  SHR 3" << std::endl;
-        for (int j = t-12; j <= t-1; j++) {
-            std::cout << indent << "W" << (j < 10 ? " " : "") << j << " " << bits(schedule[j]) << std::endl;
-        }
-        std::cout << indent << "W" << t << "                                  = σ1(t-2) + (t-7) + σ0(t-15) + (t-16)" << std::endl;
-        delay("fastest");
-    }
-    delay("normal");
-    
-    // SHR 3 animation
-    for (int i = 1; i <= 3; i++) {
-        clearScreen();
-        std::cout << indent << "----------------" << std::endl;
-        std::cout << indent << "message schedule: (expansion)" << std::endl;
-        std::cout << indent << "----------------" << std::endl;
-        std::cout << indent << "W" << (t-16 < 10 ? " " : "") << (t-16) << " " << bits(schedule[t-16]) << "  ->  " << bits(schedule[t-16]) << std::endl;
-        std::cout << indent << "W" << (t-15 < 10 ? " " : "") << (t-15) << " " << bits(schedule[t-15]) << "  ->  " << bits(rotr(7, schedule[t-15])) << " ROTR 7" << std::endl;
-        std::cout << indent << "W" << (t-14 < 10 ? " " : "") << (t-14) << " " << bits(schedule[t-14]) << "      " << bits(rotr(18, schedule[t-15])) << " ROTR 18" << std::endl;
-        std::cout << indent << "W" << (t-13 < 10 ? " " : "") << (t-13) << " " << bits(schedule[t-13]) << "      " << bits(shr(i, schedule[t-15])) << "  SHR 3" << std::endl;
-        for (int j = t-12; j <= t-1; j++) {
-            std::cout << indent << "W" << (j < 10 ? " " : "") << j << " " << bits(schedule[j]) << std::endl;
-        }
-        std::cout << indent << "W" << t << "                                  = σ1(t-2) + (t-7) + σ0(t-15) + (t-16)" << std::endl;
-        delay("fastest");
-    }
-    delay("normal");
-    
-    // Show XOR combination for sigma0
-    uint32_t sigma0_val = sigma0(schedule[t-15]);
-    clearScreen();
-    std::cout << indent << "----------------" << std::endl;
-    std::cout << indent << "message schedule: (expansion)" << std::endl;
-    std::cout << indent << "----------------" << std::endl;
-    std::cout << indent << "W" << (t-16 < 10 ? " " : "") << (t-16) << " " << bits(schedule[t-16]) << "  ->  " << bits(schedule[t-16]) << std::endl;
-    std::cout << indent << "W" << (t-15 < 10 ? " " : "") << (t-15) << " " << bits(schedule[t-15]) << "  ->  " << bits(sigma0_val) << " σ0" << std::endl;
-    std::cout << indent << "W" << (t-14 < 10 ? " " : "") << (t-14) << " " << bits(schedule[t-14]) << std::endl;
-    std::cout << indent << "W" << (t-13 < 10 ? " " : "") << (t-13) << " " << bits(schedule[t-13]) << std::endl;
-    for (int j = t-12; j <= t-1; j++) {
-        std::cout << indent << "W" << (j < 10 ? " " : "") << j << " " << bits(schedule[j]) << std::endl;
-    }
-    std::cout << indent << "W" << t << "                                  = σ1(t-2) + (t-7) + σ0(t-15) + (t-16)" << std::endl;
-    delay("normal");
-    
-    // ============ σ1 animation (similar to σ0) ============
-    // This follows the same pattern but for t-2
-    
-    // Final result
-    uint32_t result = add(sigma1(schedule[t-2]), schedule[t-7], sigma0(schedule[t-15]), schedule[t-16]);
-    
-    clearScreen();
-    std::cout << indent << "----------------" << std::endl;
-    std::cout << indent << "message schedule: (expansion)" << std::endl;
-    std::cout << indent << "----------------" << std::endl;
-    std::cout << indent << "W" << (t-16 < 10 ? " " : "") << (t-16) << " " << bits(schedule[t-16]) << "  ->  " << bits(schedule[t-16]) << std::endl;
-    std::cout << indent << "W" << (t-15 < 10 ? " " : "") << (t-15) << " " << bits(schedule[t-15]) << "  ->  " << bits(sigma0(schedule[t-15])) << " σ0" << std::endl;
-    std::cout << indent << "W" << (t-14 < 10 ? " " : "") << (t-14) << " " << bits(schedule[t-14]) << std::endl;
-    std::cout << indent << "W" << (t-13 < 10 ? " " : "") << (t-13) << " " << bits(schedule[t-13]) << std::endl;
-    std::cout << indent << "W" << (t-12 < 10 ? " " : "") << (t-12) << " " << bits(schedule[t-12]) << std::endl;
-    std::cout << indent << "W" << (t-11 < 10 ? " " : "") << (t-11) << " " << bits(schedule[t-11]) << std::endl;
-    std::cout << indent << "W" << (t-10 < 10 ? " " : "") << (t-10) << " " << bits(schedule[t-10]) << std::endl;
-    std::cout << indent << "W" << (t-9 < 10 ? " " : "") << (t-9) << " " << bits(schedule[t-9]) << std::endl;
-    std::cout << indent << "W" << (t-8 < 10 ? " " : "") << (t-8) << " " << bits(schedule[t-8]) << std::endl;
-    std::cout << indent << "W" << (t-7 < 10 ? " " : "") << (t-7) << " " << bits(schedule[t-7]) << "  ->  " << bits(schedule[t-7]) << std::endl;
-    std::cout << indent << "W" << (t-6 < 10 ? " " : "") << (t-6) << " " << bits(schedule[t-6]) << std::endl;
-    std::cout << indent << "W" << (t-5 < 10 ? " " : "") << (t-5) << " " << bits(schedule[t-5]) << std::endl;
-    std::cout << indent << "W" << (t-4 < 10 ? " " : "") << (t-4) << " " << bits(schedule[t-4]) << std::endl;
-    std::cout << indent << "W" << (t-3 < 10 ? " " : "") << (t-3) << " " << bits(schedule[t-3]) << std::endl;
-    std::cout << indent << "W" << (t-2 < 10 ? " " : "") << (t-2) << " " << bits(schedule[t-2]) << "  ->  " << bits(sigma1(schedule[t-2])) << " σ1" << std::endl;
-    std::cout << indent << "W" << (t-1 < 10 ? " " : "") << (t-1) << " " << bits(schedule[t-1]) << std::endl;
-    std::cout << indent << "W" << t << " " << bits(result) << " = σ1(t-2) + (t-7) + σ0(t-15) + (t-16)" << std::endl;
     delay("end");
+}
+
+void showSchedule() {
+    clearScreen();
+    std::cout << "========================" << std::endl;
+    std::cout << "Message Schedule for Block " << g_block_number << std::endl;
+    std::cout << "========================" << std::endl;
+    
+    auto schedule = calculate_schedule(g_block);
+    for (int i = 0; i < 16; i++) {
+        std::cout << "W" << std::setw(2) << i << ": " << bits(schedule[i]) << std::endl;
+    }
+    std::cout << "..." << std::endl;
+    delay("normal");
+}
+
+void showCompression() {
+    clearScreen();
+    std::cout << "========================" << std::endl;
+    std::cout << "Compression Function - Block " << g_block_number << std::endl;
+    std::cout << "========================" << std::endl;
+    std::cout << "Current hash values:" << std::endl;
+    for (int i = 0; i < 8; i++) {
+        std::cout << "h" << i << ": " << bits(g_hash[i]) << " (0x" << hex(g_hash[i]) << ")" << std::endl;
+    }
+    delay("normal");
+}
+
+void showFinalHash() {
+    clearScreen();
+    std::cout << "========================" << std::endl;
+    std::cout << "Final SHA-256 Hash" << std::endl;
+    std::cout << "========================" << std::endl;
+    
+    std::cout << "\nFull Hash: ";
+    for (uint32_t val : g_hash) {
+        std::cout << hex(val);
+    }
+    std::cout << std::dec << std::endl;
+    std::cout << "========================" << std::endl;
+}
+
+// ============ Main SHA-256 Driver ============
+int main(int argc, char* argv[]) {
+    signal(SIGINT, signalHandler);
+
+    // Parse arguments
+    if (argc >= 2) {
+        g_input = argv[1];
+    } else {
+        g_input = "abc";
+    }
+    
+    if (argc >= 3) {
+        g_delay = argv[2];
+    }
+
+    // Process input
+    g_type = input_type(g_input);
+    
+    if (g_type == "file") {
+        std::ifstream file(g_input);
+        if (file.is_open()) {
+            std::string content((std::istreambuf_iterator<char>(file)),
+                                std::istreambuf_iterator<char>());
+            g_input = content;
+            file.close();
+        }
+    }
+
+    g_bytes = bytes(g_input, g_type);
+
+    if (g_type == "string" || g_type == "file" || g_type == "hex") {
+        g_message = "";
+        for (uint8_t byte : g_bytes) {
+            g_message += std::bitset<8>(byte).to_string();
+        }
+    } else if (g_type == "binary") {
+        g_message = g_input.substr(2);
+    }
+
+    if (g_delay == "enter") {
+        std::cout << "Hit enter to step through." << std::endl;
+        std::cin.get();
+    }
+
+    // Visualization steps
+    showMessage();
+    
+    std::string padded = padding(g_message);
+    g_blocks = split(padded, 512);
+    showPadding();
+    showBlocks();
+    
+    g_hash = IV;
+    showInitialHashValues();
+    
+    for (size_t i = 0; i < g_blocks.size(); i++) {
+        g_block = g_blocks[i];
+        g_block_number = i;
+        
+        showSchedule();
+        showCompression();
+        
+        auto schedule = calculate_schedule(g_block);
+        g_hash = compression(g_hash, schedule);
+    }
+    
+    showFinalHash();
     
     return 0;
 }
