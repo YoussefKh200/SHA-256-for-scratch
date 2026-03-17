@@ -4,7 +4,7 @@ This project demonstrates the inner workings of the SHA-256 algorithm, including
 
 ## 🎥 Demo
 
-![SHA-256 Animation](docs/demo.gif)
+[![SHA-256 Animation](docs/demo.gif)](https://github.com/YoussefKh200/SHA-256-from-scratch/blob/main/sha.gif?raw=true)
 
 ## 🚀 Build Instructions
 
